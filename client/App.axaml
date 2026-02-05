@@ -1,0 +1,30 @@
+<Application xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:vm="clr-namespace:client.ViewModels"
+             xmlns:conv="clr-namespace:client.Converters"
+             xmlns:views="clr-namespace:client.Views"
+             x:Class="client.App"
+             RequestedThemeVariant="Default">
+    <!-- "Default" ThemeVariant follows system theme variant. "Dark" or "Light" are other available options. -->
+
+    <Application.Styles>
+        <FluentTheme />
+    </Application.Styles>
+
+    <Application.Resources>
+        <conv:BooleanToBrushConverter x:Key="BooleanToBrushConverter" />
+        <conv:GameCellToBrushConverter x:Key="GameCellToBrushConverter" />
+    </Application.Resources>
+
+    <Application.DataTemplates>
+        <DataTemplate DataType="vm:MainMenuViewModel">
+            <views:MainMenuView />
+        </DataTemplate>
+        <DataTemplate DataType="vm:PlacementViewModel">
+            <views:PlacementView />
+        </DataTemplate>
+        <DataTemplate DataType="vm:GameViewModel">
+            <views:GameView />
+        </DataTemplate>
+    </Application.DataTemplates>
+</Application>

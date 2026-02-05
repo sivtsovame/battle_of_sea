@@ -1,0 +1,53 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:vm="clr-namespace:client.ViewModels"
+             xmlns:m="clr-namespace:client.Models"
+             x:DataType="vm:MainMenuViewModel"
+             x:Class="client.Views.MainMenuView">
+  <Grid RowDefinitions="Auto,*" Margin="16">
+    <StackPanel>
+      <TextBlock Text="Морской бой" FontSize="24" FontWeight="Bold" Margin="0,0,0,8"/>
+      <TextBlock Text="{Binding Status}" Margin="0,0,0,8"/>
+
+      <StackPanel Orientation="Horizontal" Margin="0,0,0,8" Spacing="8">
+        <Button Content="Подключиться к серверу"
+                Command="{Binding ConnectCommand}"/>
+        <Button Content="Обновить список"
+                Command="{Binding RefreshRoomsCommand}"/>
+      </StackPanel>
+
+      <StackPanel Orientation="Horizontal" Margin="0,0,0,8" Spacing="8">
+        <TextBox Width="200"
+                 Text="{Binding RoomName}"
+                 Watermark="Название комнаты"/>
+        <Button Content="Создать игру"
+                Command="{Binding CreateRoomCommand}"/>
+      </StackPanel>
+
+      <TextBlock Text="Список комнат:" FontWeight="Bold" Margin="0,8,0,4"/>
+    </StackPanel>
+
+    <ListBox Grid.Row="1"
+             ItemsSource="{Binding Rooms}"
+             SelectedItem="{Binding SelectedRoom}">
+      <ListBox.ItemTemplate>
+        <DataTemplate>
+          <StackPanel Orientation="Horizontal" Spacing="8" x:DataType="m:RoomInfo">
+            <TextBlock Text="{Binding Name}"/>
+            <TextBlock Text="{Binding Players}"/>
+            <TextBlock Text="/"/>
+            <TextBlock Text="{Binding MaxPlayers}"/>
+          </StackPanel>
+        </DataTemplate>
+      </ListBox.ItemTemplate>
+    </ListBox>
+
+    <Button Grid.Row="1"
+            HorizontalAlignment="Right"
+            VerticalAlignment="Bottom"
+            Margin="0,0,0,8"
+            Content="Подключиться к выбранной"
+            Command="{Binding JoinRoomCommand}"/>
+  </Grid>
+</UserControl>
+

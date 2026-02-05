@@ -1,0 +1,4 @@
+<Solution>
+  <Project Path="SeaBattleChat/SeaBattleChat.csproj" />
+  <Project Path="SeaBattleChatServer/SeaBattleChatServer.csproj" Id="00fd4a27-3165-47d3-b46b-01c3e82eff94" />
+</Solution>

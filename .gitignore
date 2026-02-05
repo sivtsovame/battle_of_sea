@@ -1,0 +1,62 @@
+# Visual Studio
+.vs/
+
+# Build results
+bin/
+obj/
+
+# User-specific files
+*.user
+*.suo
+*.cache
+
+bin/
+obj/
+.vs/
+*.user
+*.suo
+*.userprefs
+*.db
+*.sqlite
+.idea/
+.vscode/
+
+# NuGet
+packages/
+*.nupkg
+
+# Rider
+.idea/
+
+# Mac
+.DS_Store
+
+# Build outputs
+publish/
+
+# Logs
+*.log
+
+# Rider caches
+.idea/**/workspace.xml
+.idea/**/tasks.xml
+.idea/**/dictionaries
+
+# JetBrains Rider
+.idea/
+*.sln.iml
+
+# VS Code
+.vscode/
+
+# Visual Studio
+.vs/
+
+# Build results
+bin/
+obj/
+
+# User-specific files
+*.user
+*.suo
+*.cache
