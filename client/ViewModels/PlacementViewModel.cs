@@ -13,6 +13,9 @@ using client.Utils;
 
 namespace client.ViewModels;
 
+/// <summary>Сигнатура события начала игры: первый ход, корабли с сервера (если есть), время старта хода.</summary>
+public delegate void GameStartedHandler(bool isYourTurn, IReadOnlyList<(int x, int y)>? myShips, long turnStartedAtUtcMs);
+
 public class PlacementViewModel : INotifyPropertyChanged
 {
     private readonly GameServerClient _client;
@@ -75,6 +78,14 @@ public class PlacementViewModel : INotifyPropertyChanged
 
     public bool CanPressReady => _allShipsPlaced && !_isReady;
 
+    /// <summary>Чат доступен только когда в комнате два игрока.</summary>
+    private bool _canUseChat;
+    public bool CanUseChat
+    {
+        get => _canUseChat;
+        set { _canUseChat = value; OnPropertyChanged(); (SendChatCommand as RelayCommand)?.RaiseCanExecuteChanged(); }
+    }
+
     public ObservableCollection<ChatMessageItem> ChatMessages { get; } = new();
     private string _chatText = "";
     public string ChatText
@@ -88,7 +99,7 @@ public class PlacementViewModel : INotifyPropertyChanged
     public event System.Action? BackRequested;
     /// <param name="isYourTurn">Чей первый ход.</param>
     /// <param name="myShips">Координаты кораблей с сервера (если есть) — приоритет над локальными.</param>
-    public event System.Action<bool, IReadOnlyList<(int x, int y)>?>? GameStarted;
+    public event GameStartedHandler? GameStarted;
 
     public PlacementViewModel(GameServerClient client, RoomInfo room, string displayName = "Player")
     {
@@ -96,6 +107,7 @@ public class PlacementViewModel : INotifyPropertyChanged
         Room = room;
         _displayName = displayName;
         Room.MyPlayerName = displayName;
+        CanUseChat = Room.Players >= 2;
 
         // инициализируем поле 10x10
         for (var y = 0; y < 10; y++)
@@ -134,7 +146,7 @@ public class PlacementViewModel : INotifyPropertyChanged
 
         ReadyCommand = new RelayCommand(async _ => await SendReadyAsync(), _ => CanPressReady);
 
-        SendChatCommand = new RelayCommand(async _ => await SendChatAsync(), _ => !string.IsNullOrWhiteSpace(ChatText));
+        SendChatCommand = new RelayCommand(async _ => await SendChatAsync(), _ => CanUseChat && !string.IsNullOrWhiteSpace(ChatText));
 
         _client.MessageReceived += OnServerMessage;
     }
@@ -174,7 +186,8 @@ public class PlacementViewModel : INotifyPropertyChanged
                 if (list.Count > 0)
                     myShipsFromServer = list;
             }
-            GameStarted?.Invoke(isYourTurn, myShipsFromServer);
+            var turnStartedAt = payload.TryGetProperty("turnStartedAt", out var ts) ? ts.GetInt64() : 0L;
+            GameStarted?.Invoke(isYourTurn, myShipsFromServer, turnStartedAt);
         }
         else if (string.Equals(type, "RoomClosed", StringComparison.OrdinalIgnoreCase))
         {
@@ -183,8 +196,23 @@ public class PlacementViewModel : INotifyPropertyChanged
         }
         else if (string.Equals(type, "OpponentLeft", StringComparison.OrdinalIgnoreCase))
         {
-            // Вышел НЕ создатель комнаты — комната остаётся, мы должны оставаться в ней.
             Status = "Соперник вышел из комнаты. Ожидаем нового игрока...";
+            ChatMessages.Clear();
+            CanUseChat = false;
+        }
+        else if (string.Equals(type, "OpponentJoined", StringComparison.OrdinalIgnoreCase))
+        {
+            var roomName = GetString(payload, "roomName");
+            if (!string.IsNullOrEmpty(roomName))
+            {
+                Room.Name = roomName;
+                OnPropertyChanged(nameof(Room));
+            }
+            CanUseChat = true;
+            if (_isReady)
+                Status = "Вы готовы. Ожидаем соперника...";
+            else
+                Status = "Соперник в комнате. Расставьте корабли и нажмите «Готов к бою».";
         }
         else if (string.Equals(type, "Chat", StringComparison.OrdinalIgnoreCase))
         {

@@ -9,6 +9,7 @@ using System.Windows.Input;
 using System.Threading;
 using System.Threading.Tasks;
 using Avalonia.Media;
+using Avalonia.Threading;
 using client.Models;
 using client.Services;
 using client.Utils;
@@ -114,7 +115,12 @@ public class GameViewModel : INotifyPropertyChanged
     private string _gameResult;
     private bool _gameResultVisible;
     private int _turnSecondsLeft = 30;
-    private CancellationTokenSource? _turnTimerCts;
+    /// <summary>Серверное время начала текущего хода (Unix ms). Таймер на обоих клиентах считается от него.</summary>
+    private long _turnStartedAtUtcMs;
+    private CancellationTokenSource? _displayLoopCts;
+    private bool _canPlayAgain = true;
+    private bool _requestedPlayAgain;
+    private string _postGameInfo = "";
 
     public RoomInfo Room { get; }
 
@@ -142,10 +148,6 @@ public class GameViewModel : INotifyPropertyChanged
             _isMyTurn = value;
             OnPropertyChanged();
             RaiseShootCanExecute();
-            if (value)
-                StartTurnCountdown();
-            else
-                StopTurnCountdown();
         }
     }
 
@@ -173,8 +175,29 @@ public class GameViewModel : INotifyPropertyChanged
         set { _gameResultVisible = value; OnPropertyChanged(); }
     }
 
+        public bool CanPlayAgain
+        {
+            get => _canPlayAgain;
+            set { _canPlayAgain = value; OnPropertyChanged(); }
+        }
+
+    public bool RequestedPlayAgain
+    {
+        get => _requestedPlayAgain;
+        set { _requestedPlayAgain = value; OnPropertyChanged(); OnPropertyChanged(nameof(CanRequestPlayAgain)); }
+    }
+
+    public bool CanRequestPlayAgain => CanPlayAgain && !RequestedPlayAgain;
+
+    public string PostGameInfo
+    {
+        get => _postGameInfo;
+        set { _postGameInfo = value ?? ""; OnPropertyChanged(); }
+    }
+
     public ICommand ShootCommand { get; }
     public ICommand PlayAgainCommand { get; }
+        public ICommand GoToMainMenuCommand { get; }
     public ICommand SendChatCommand { get; }
 
     public ObservableCollection<ChatMessageItem> ChatMessages { get; } = new();
@@ -189,7 +212,14 @@ public class GameViewModel : INotifyPropertyChanged
     public event Action<RoomInfo>? ReturnToPlacementRequested;
     public event Action? ReturnToMainMenuRequested;
 
-    public GameViewModel(GameServerClient client, RoomInfo room, bool isYourTurn, IReadOnlyList<(int x, int y)> myShips)
+    /// <summary>Отписаться от сообщений (вызывать при переходе на экран расстановки), чтобы не дублировать обработку OpponentLeft и не подменять экран.</summary>
+    public void DetachFromClient()
+    {
+        _client.MessageReceived -= OnServerMessage;
+        StopDisplayLoop();
+    }
+
+    public GameViewModel(GameServerClient client, RoomInfo room, bool isYourTurn, IReadOnlyList<(int x, int y)> myShips, long turnStartedAtUtcMs = 0)
     {
         _client = client;
         Room = room;
@@ -198,6 +228,8 @@ public class GameViewModel : INotifyPropertyChanged
         _gameOver = false;
         _gameResult = string.Empty;
         _gameResultVisible = false;
+        _canPlayAgain = true;
+        _turnStartedAtUtcMs = turnStartedAtUtcMs;
 
         for (int y = 0; y < 10; y++)
             for (int x = 0; x < 10; x++)
@@ -223,9 +255,17 @@ public class GameViewModel : INotifyPropertyChanged
         ICommand? playAgainCmd = null;
         playAgainCmd = new RelayCommand(async _ =>
         {
+            RequestedPlayAgain = true;
+            PostGameInfo = "Ожидаем решения второго игрока...";
             await _client.SendAsync("playAgain", new { });
         });
         PlayAgainCommand = playAgainCmd;
+
+        GoToMainMenuCommand = new RelayCommand(async _ =>
+        {
+            await _client.SendAsync("leaveroom", new { });
+            ReturnToMainMenuRequested?.Invoke();
+        });
 
         SendChatCommand = new RelayCommand(async _ => await SendChatAsync(), _ => !string.IsNullOrWhiteSpace(ChatText));
 
@@ -236,9 +276,7 @@ public class GameViewModel : INotifyPropertyChanged
         }
 
         _client.MessageReceived += OnServerMessage;
-
-        if (isYourTurn)
-            StartTurnCountdown();
+        StartDisplayLoop();
     }
 
     private async Task SendChatAsync()
@@ -254,14 +292,18 @@ public class GameViewModel : INotifyPropertyChanged
 
     private const int TurnDurationSeconds = 30;
 
-    private async void StartTurnCountdown()
+    private void SetTurnStartedAt(long turnStartedAtUtcMs)
     {
-        StopTurnCountdown();
-        _turnTimerCts = new CancellationTokenSource();
-        var token = _turnTimerCts.Token;
-        for (int s = TurnDurationSeconds; s >= 0 && !token.IsCancellationRequested; s--)
+        _turnStartedAtUtcMs = turnStartedAtUtcMs;
+    }
+
+    /// <summary>Цикл обновления таймера по серверному времени — на обоих клиентах одинаковые секунды.</summary>
+    private async void StartDisplayLoop()
+    {
+        _displayLoopCts = new CancellationTokenSource();
+        var token = _displayLoopCts.Token;
+        while (!token.IsCancellationRequested)
         {
-            TurnSecondsLeft = s;
             try
             {
                 await Task.Delay(1000, token);
@@ -270,14 +312,22 @@ public class GameViewModel : INotifyPropertyChanged
             {
                 break;
             }
+            if (_gameOver || _turnStartedAtUtcMs == 0) continue;
+            var now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            var elapsed = (now - _turnStartedAtUtcMs) / 1000.0;
+            var left = (int)Math.Max(0, TurnDurationSeconds - (int)elapsed);
+            Dispatcher.UIThread.Post(() =>
+            {
+                if (_gameOver) return;
+                TurnSecondsLeft = left;
+            });
         }
     }
 
-    private void StopTurnCountdown()
+    private void StopDisplayLoop()
     {
-        _turnTimerCts?.Cancel();
-        _turnTimerCts = null;
-        TurnSecondsLeft = 30;
+        _displayLoopCts?.Cancel();
+        _displayLoopCts = null;
     }
 
     private void RaiseShootCanExecute() => (ShootCommand as RelayCommand)?.RaiseCanExecuteChanged();
@@ -296,12 +346,14 @@ public class GameViewModel : INotifyPropertyChanged
                 var newState = ParseShotState(res);
                 cell.ShotState = newState;
                 
-                // При попадании/потоплении — стреляем ещё раз; при промахе ждём YourTurn/OpponentTurn
+                // При попадании/потоплении — стреляем ещё раз; при промахе ждём YourTurn/OpponentTurn.
+                // Логика хода (кто ходит) управляется только серверными событиями YourTurn/OpponentTurn,
+                // но клиентский таймер для наглядности каждый раз сбрасываем на 30 секунд.
                 if (res == "Hit" || res == "Sunk")
                 {
-                    IsMyTurn = true; // таймер перезапустится через set
                     Status = "Вы попали! Ваш ход продолжается. Выберите клетку на поле противника.";
-                    StartTurnCountdown();
+                    if (payload.TryGetProperty("turnStartedAt", out var ts))
+                        SetTurnStartedAt(ts.GetInt64());
                 }
             }
         }
@@ -323,31 +375,44 @@ public class GameViewModel : INotifyPropertyChanged
         {
             IsMyTurn = true;
             Status = "Ваш ход. Выберите клетку на поле противника.";
+            if (payload.TryGetProperty("turnStartedAt", out var yt))
+                SetTurnStartedAt(yt.GetInt64());
         }
         else if (string.Equals(type, "OpponentTurn", StringComparison.OrdinalIgnoreCase) ||
                  string.Equals(type, "opponent_turn", StringComparison.OrdinalIgnoreCase))
         {
             IsMyTurn = false;
             Status = "Ход соперника.";
+            if (payload.TryGetProperty("turnStartedAt", out var ot))
+                SetTurnStartedAt(ot.GetInt64());
         }
         else if (string.Equals(type, "GameOver", StringComparison.OrdinalIgnoreCase))
         {
             var winner = GetString(payload, "winner");
+            var reason = GetString(payload, "reason");
             var myName = Room.MyPlayerName;
             
             GameOver = true;
             IsMyTurn = false;
-            
+            RequestedPlayAgain = false;
+            PostGameInfo = "";
+
+            // Если соперник отключился, новую игру начать нельзя — только выйти в меню
+            if (string.Equals(reason, "opponent_disconnected", StringComparison.OrdinalIgnoreCase))
+            {
+                CanPlayAgain = false;
+            }
+
             if (string.Equals(winner, myName, StringComparison.OrdinalIgnoreCase))
             {
                 IsWinner = true;
-                GameResult = $"Вы выиграли! Поздравляем!";
+                GameResult = $"Игра окончена. Вы выиграли! Соперник проиграл.";
                 Status = "Игра окончена. Вы победили!";
             }
             else
             {
                 IsWinner = false;
-                GameResult = $"Вы проиграли. {winner} победил.";
+                GameResult = $"Игра окончена. Победил {winner}. Вы проиграли.";
                 Status = "Игра окончена. Вы проиграли.";
             }
             
@@ -373,6 +438,26 @@ public class GameViewModel : INotifyPropertyChanged
         {
             IsMyTurn = false;
             Status = "Время вышло. Ход соперника.";
+            if (payload.TryGetProperty("turnStartedAt", out var tt))
+                SetTurnStartedAt(tt.GetInt64());
+        }
+        else if (string.Equals(type, "info", StringComparison.OrdinalIgnoreCase))
+        {
+            // Важно для UX: показать, что запрос "Начать новую игру" принят,
+            // и мы ждём ответа второго игрока.
+            var msg = GetString(payload, "message");
+            if (!string.IsNullOrEmpty(msg) && GameResultVisible)
+            {
+                if (msg.Contains("play again", StringComparison.OrdinalIgnoreCase) ||
+                    msg.Contains("opponent", StringComparison.OrdinalIgnoreCase))
+                {
+                    PostGameInfo = "Ожидаем решения второго игрока...";
+                }
+                else
+                {
+                    PostGameInfo = msg;
+                }
+            }
         }
         else if (string.Equals(type, "Chat", StringComparison.OrdinalIgnoreCase))
         {

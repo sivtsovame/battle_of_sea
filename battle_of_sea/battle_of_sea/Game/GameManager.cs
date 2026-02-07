@@ -1,5 +1,8 @@
 using System.Collections.Generic;
 using System.Linq;
+using System.Threading.Tasks;
+using battle_of_sea.Network;
+using battle_of_sea.Protocol;
 
 namespace battle_of_sea.Game
 {
@@ -53,27 +56,57 @@ namespace battle_of_sea.Game
             Console.WriteLine($"Player added: {player.Name}");
         }
 
-        public void RemovePlayer(string playerId)
+        public async Task RemovePlayer(string playerId)
         {
             if (AllPlayers.TryGetValue(playerId, out var player))
             {
                 AllPlayers.Remove(playerId);
                 Players.Remove(player);
-                
-                // Удаляем игрока из комнаты
+
+                // Проверяем, есть ли активная игра с участием игрока
+                var game = ActiveGames.FirstOrDefault(g => g.Player1.Id == playerId || g.Player2.Id == playerId);
+                if (game != null)
+                {
+                    var roomForGame = Rooms.FirstOrDefault(r => r.Players.Contains(game.Player1) || r.Players.Contains(game.Player2));
+
+                    // Если игра ещё не была завершена — считаем, что один из клиентов "закрыл окно".
+                    // Победа достаётся оставшемуся игроку, игра завершается, комната удаляется.
+                    if (!game.IsFinished)
+                    {
+                        var winner = game.Player1.Id == playerId ? game.Player2 : game.Player1;
+                        if (winner != null && winner.Connection is WebSocketConnection wsConn)
+                        {
+                            await wsConn.SendAsync(new ServerMessage
+                            {
+                                Type = "GameOver",
+                                Payload = new { winner = winner.Name, reason = "opponent_disconnected" }
+                            });
+                        }
+
+                        if (roomForGame != null)
+                        {
+                            Rooms.Remove(roomForGame);
+                            Console.WriteLine($"[RemovePlayer] Room removed due to disconnect: {roomForGame.Name}");
+                        }
+
+                        ActiveGames.Remove(game);
+                        Console.WriteLine($"[RemovePlayer] Game removed due to disconnect: {game.Player1.Name} vs {game.Player2.Name}");
+                    }
+                    else
+                    {
+                        // Игра уже была завершена (обычная победа) — просто удаляем её.
+                        ActiveGames.Remove(game);
+                        Console.WriteLine($"[RemovePlayer] Finished game removed: {game.Player1.Name} vs {game.Player2.Name}");
+                    }
+                }
+
+                // Удаляем игрока из комнаты (если он в какой-то комнате без активной игры)
                 var room = Rooms.FirstOrDefault(r => r.Players.Contains(player));
                 if (room != null)
                 {
                     room.Players.Remove(player);
                 }
-                
-                // Если игрок был в игре, удаляем игру
-                var game = ActiveGames.FirstOrDefault(g => g.Player1.Id == playerId || g.Player2.Id == playerId);
-                if (game != null)
-                {
-                    RemoveGame(game);
-                }
-                
+
                 Console.WriteLine($"Player removed: {player.Name}");
             }
         }
@@ -123,22 +156,50 @@ namespace battle_of_sea.Game
                 Console.WriteLine($"[GameManager.JoinRoom] Player added. Room now has {room.Players.Count} players");
             }
 
-            // Если комната полна, создаём сессию и восстанавливаем готовность из комнаты (P1 мог нажать «Готово» до прихода P2)
+            // Если комната полна, создаём (или переиспользуем) сессию и восстанавливаем готовность из комнаты.
+            // ВАЖНО: при повторных заходах/выходах второго игрока после PlayAgain
+            // не создаём новые GameSession поверх старых, а переиспользуем существующую.
             if (room.Players.Count >= room.MaxPlayers)
             {
-                Console.WriteLine($"[GameManager.JoinRoom] ✅ Room is FULL! Creating game session...");
-                var game = new GameSession(room.Players[0], room.Players[1]);
-                game.Player1Ready = room.PlayerReadyStatus.GetValueOrDefault(room.Players[0].Id, false);
-                game.Player2Ready = room.PlayerReadyStatus.GetValueOrDefault(room.Players[1].Id, false);
-                room.Players[0].IsReady = game.Player1Ready;
-                room.Players[1].IsReady = game.Player2Ready;
+                Console.WriteLine($"[GameManager.JoinRoom] ✅ Room is FULL! Looking for existing game session...");
 
-                game.GameFinished += FinishGame;
-                ActiveGames.Add(game);
+                // Пытаемся найти уже существующую игру для этих двух игроков
+                var existingGame = ActiveGames.FirstOrDefault(g =>
+                    (g.Player1.Id == room.Players[0].Id && g.Player2.Id == room.Players[1].Id) ||
+                    (g.Player1.Id == room.Players[1].Id && g.Player2.Id == room.Players[0].Id));
+
+                GameSession game;
+
+                if (existingGame != null)
+                {
+                    Console.WriteLine("[GameManager.JoinRoom] Reusing existing GameSession for players in this room.");
+                    game = existingGame;
+                }
+                else
+                {
+                    // Первый ход в каждой партии всегда у создателя комнаты — создаём сессию так, чтобы Player1 был создатель.
+                    var creator = room.CreatorId != null ? room.Players.FirstOrDefault(p => p.Id == room.CreatorId) : null;
+                    var other = creator != null ? room.Players.FirstOrDefault(p => p.Id != creator.Id) : null;
+                    if (creator == null || other == null)
+                    {
+                        creator = room.Players[0];
+                        other = room.Players[1];
+                    }
+                    Console.WriteLine($"[GameManager.JoinRoom] Creating new GameSession for room {room.Name} (creator={creator.Name} = P1)...");
+                    game = new GameSession(creator, other);
+                    game.GameFinished += FinishGame;
+                    ActiveGames.Add(game);
+                }
+
+                // Восстанавливаем флаги готовности из комнаты для обоих игроков (готовность создателя при выходе второго не трогаем).
+                game.Player1Ready = room.PlayerReadyStatus.GetValueOrDefault(game.Player1.Id, false);
+                game.Player2Ready = room.PlayerReadyStatus.GetValueOrDefault(game.Player2.Id, false);
+                game.Player1.IsReady = game.Player1Ready;
+                game.Player2.IsReady = game.Player2Ready;
+
                 room.IsGameStarted = true;
-                Console.WriteLine($"[GameManager.JoinRoom] ✅ Game session created (P1Ready={game.Player1Ready}, P2Ready={game.Player2Ready})");
-
-                Console.WriteLine($"Game started in room {room.Name}: {room.Players[0].Name} vs {room.Players[1].Name}");
+                Console.WriteLine($"[GameManager.JoinRoom] ✅ Game session ready (P1Ready={game.Player1Ready}, P2Ready={game.Player2Ready})");
+                Console.WriteLine($"Game in room {room.Name}: {game.Player1.Name} vs {game.Player2.Name}");
             }
             else
             {

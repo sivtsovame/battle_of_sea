@@ -70,13 +70,28 @@
       <Border Background="White" BorderBrush="Black" BorderThickness="2" CornerRadius="8" Padding="16">
         <StackPanel Spacing="16" VerticalAlignment="Center" HorizontalAlignment="Center">
           <TextBlock Text="{Binding GameResult}" FontSize="18" FontWeight="Bold" TextAlignment="Center"/>
+          
+          <!-- Кнопка "Начать новую игру" показывается только если это возможно -->
           <Button Content="Начать новую игру" 
                   Command="{Binding PlayAgainCommand}"
                   Padding="16,8"
                   Background="Blue"
                   Foreground="White"
+                  HorizontalAlignment="Center"
+                  IsVisible="{Binding CanPlayAgain}"
+                  IsEnabled="{Binding CanRequestPlayAgain}"/>
+
+          <Button Content="В главное меню"
+                  Command="{Binding GoToMainMenuCommand}"
+                  Padding="16,8"
+                  Background="Gray"
+                  Foreground="White"
                   HorizontalAlignment="Center"/>
-          <TextBlock Text="Ожидание решения второго игрока..." FontSize="12" TextAlignment="Center" Foreground="Gray"/>
+
+          <TextBlock Text="{Binding PostGameInfo}"
+                     FontSize="12"
+                     TextAlignment="Center"
+                     Foreground="Gray"/>
         </StackPanel>
       </Border>
     </Grid>

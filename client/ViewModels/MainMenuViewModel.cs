@@ -48,6 +48,12 @@ public class MainMenuViewModel : INotifyPropertyChanged
 
     public event Action<RoomInfo>? RoomJoined;
 
+    /// <summary>Отписаться от сообщений (вызывать при переходе в комнату/расстановку), чтобы не обрабатывать RoomsList и не влиять на экран расстановки.</summary>
+    public void DetachFromClient()
+    {
+        _client.MessageReceived -= OnServerMessage;
+    }
+
     public MainMenuViewModel(GameServerClient client)
     {
         _client = client;
@@ -160,7 +166,10 @@ public class MainMenuViewModel : INotifyPropertyChanged
                 if (success && payload.TryGetProperty("roomId", out var roomIdProp))
                 {
                     var id = roomIdProp.GetString() ?? string.Empty;
-                    var room = new RoomInfo { Id = id, Name = "Комната", MaxPlayers = 2 };
+                    var roomName = payload.TryGetProperty("roomName", out var rn) ? (rn.GetString() ?? "Комната") : "Комната";
+                    var maxPlayers = payload.TryGetProperty("maxPlayers", out var mp) && mp.TryGetInt32(out var m) ? m : 2;
+                    var players = payload.TryGetProperty("players", out var pl) && pl.TryGetInt32(out var p) ? p : 0;
+                    var room = new RoomInfo { Id = id, Name = roomName, MaxPlayers = maxPlayers, Players = players };
                     RoomJoined?.Invoke(room);
                 }
                 break;

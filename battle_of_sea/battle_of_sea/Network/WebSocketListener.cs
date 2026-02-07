@@ -212,8 +212,8 @@ public class WebSocketConnection
             if (_player != null)
             {
                 Console.WriteLine($"Player disconnected: {_player.Name}");
-                // Удаляем игрока из GameManager
-                GameServer.Instance.GameManager.RemovePlayer(_player.Id);
+                // Удаляем игрока из GameManager (возможное завершение игры и удаление комнаты)
+                await GameServer.Instance.GameManager.RemovePlayer(_player.Id);
             }
             _webSocket?.Dispose();
         }
@@ -608,7 +608,14 @@ public class WebSocketConnection
             await SendAsync(new ServerMessage
             {
                 Type = "JoinRoom",
-                Payload = new { success = true, roomId = room.Id }
+                Payload = new
+                {
+                    success = true,
+                    roomId = room.Id,
+                    roomName = room.Name,
+                    maxPlayers = room.MaxPlayers,
+                    players = room.Players.Count
+                }
             });
 
             Console.WriteLine($"Player {_player.Name} joined room {room.Name}");
@@ -642,6 +649,21 @@ public class WebSocketConnection
                     Console.WriteLine($"[JoinRoom] ❌ Game not found in ActiveGames!");
                 }
             }
+
+            // Уведомляем остальных игроков комнаты, что соперник вошёл (передаём имя комнаты, чтобы у создателя не подменялось название).
+            var otherPlayers = room.Players.Where(p => p.Id != _player.Id).ToList();
+            foreach (var other in otherPlayers)
+            {
+                var conn = GameServer.Instance.GetConnectionByPlayerId(other.Id);
+                if (conn != null)
+                {
+                    await conn.SendAsync(new ServerMessage
+                    {
+                        Type = "OpponentJoined",
+                        Payload = new { opponentName = _player.Name, roomId = room.Id, roomName = room.Name }
+                    });
+                }
+            }
         }
         catch (Exception ex)
         {
@@ -658,6 +680,15 @@ public class WebSocketConnection
             var room = GameServer.Instance.GameManager.FindRoomByPlayerId(_player.Id);
             if (room == null)
                 return;
+            if (room.Players.Count < 2)
+            {
+                await SendAsync(new ServerMessage
+                {
+                    Type = "error",
+                    Payload = new { message = "В комнате должен быть соперник, чтобы писать в чат." }
+                });
+                return;
+            }
             var text = payload.TryGetProperty("text", out var t) ? t.GetString()?.Trim() : null;
             if (string.IsNullOrEmpty(text))
                 return;
@@ -714,23 +745,49 @@ public class WebSocketConnection
             }
             else
             {
-                // Выход второго игрока — удаляем его из комнаты и игру, создателю — OpponentLeft
+                // Выход второго игрока
                 var otherPlayer = room.Players.FirstOrDefault(p => p.Id != _player.Id);
-                room.Players.Remove(_player);
                 var game = GameServer.Instance.GameManager.FindGameByPlayerId(_player.Id);
-                if (game != null)
-                    GameServer.Instance.GameManager.RemoveGameOnly(game);
-                room.PlayerReadyStatus.Remove(_player.Id);
 
-                await SendAsync(new ServerMessage { Type = "LeftRoom", Payload = new { success = true } });
-                if (otherPlayer != null)
+                // Если игра уже завершена (обычное окончание партии)
+                // ИЛИ игра находится в состоянии "переигровки" (оба выбрали PlayAgain и сейчас в расстановке),
+                // то при выходе любого игрока комнату удаляем полностью.
+                if (game != null && (game.IsFinished || game.RestartPending))
                 {
-                    var otherConn = GameServer.Instance.GetConnectionByPlayerId(otherPlayer.Id);
-                    if (otherConn != null)
-                        await otherConn.SendAsync(new ServerMessage { Type = "OpponentLeft", Payload = new { message = "Соперник вышел из комнаты." } });
+                    GameServer.Instance.GameManager.RemoveRoom(room);
+
+                    await SendAsync(new ServerMessage { Type = "LeftRoom", Payload = new { success = true } });
+                    if (otherPlayer != null)
+                    {
+                        var otherConn = GameServer.Instance.GetConnectionByPlayerId(otherPlayer.Id);
+                        if (otherConn != null)
+                            await otherConn.SendAsync(new ServerMessage
+                            {
+                                Type = "RoomClosed",
+                                Payload = new { message = "Комната удалена после завершения игры." }
+                            });
+                    }
+                    await BroadcastRoomsList();
+                    Console.WriteLine($"[LeaveRoom] Player {_player.Name} left finished/restart-pending game room {room.Name} — room removed");
                 }
-                await BroadcastRoomsList();
-                Console.WriteLine($"[LeaveRoom] Player {_player.Name} left room {room.Name}");
+                else
+                {
+                    // Игра ещё не началась или не завершена — удаляем игрока из комнаты и игру, создателю — OpponentLeft
+                    room.Players.Remove(_player);
+                    if (game != null)
+                        GameServer.Instance.GameManager.RemoveGameOnly(game);
+                    room.PlayerReadyStatus.Remove(_player.Id);
+
+                    await SendAsync(new ServerMessage { Type = "LeftRoom", Payload = new { success = true } });
+                    if (otherPlayer != null)
+                    {
+                        var otherConn = GameServer.Instance.GetConnectionByPlayerId(otherPlayer.Id);
+                        if (otherConn != null)
+                            await otherConn.SendAsync(new ServerMessage { Type = "OpponentLeft", Payload = new { message = "Соперник вышел из комнаты." } });
+                    }
+                    await BroadcastRoomsList();
+                    Console.WriteLine($"[LeaveRoom] Player {_player.Name} left room {room.Name}");
+                }
             }
         }
         catch (Exception ex)
@@ -798,6 +855,9 @@ public class WebSocketConnection
             // Отмечаем этого игрока как готовного
             if (_player.Id == game.Player1.Id)
             {
+                // Сохраняем готовность в комнате, чтобы при выходе/возврате соперника
+                // и пересоздании GameSession готовность не терялась.
+                room.PlayerReadyStatus[_player.Id] = true;
                 game.Player1Ready = true;
                 _player.IsReady = true;
                 Console.WriteLine($"[PlayerReady] ✅ {_player.Name} (Player1) is ready");
@@ -811,6 +871,9 @@ public class WebSocketConnection
             }
             else
             {
+                // Сохраняем готовность в комнате, чтобы при выходе/возврате соперника
+                // и пересоздании GameSession готовность не терялась.
+                room.PlayerReadyStatus[_player.Id] = true;
                 game.Player2Ready = true;
                 _player.IsReady = true;
                 Console.WriteLine($"[PlayerReady] ✅ {_player.Name} (Player2) is ready");
@@ -832,7 +895,10 @@ public class WebSocketConnection
                 Console.WriteLine($"[PlayerReady] Both players are ready! Starting game...");
                 Console.WriteLine($"[DEBUG] ✅ BOTH PLAYERS READY - SENDING GAMESTART");
 
-                // Отправляем GameStart обоим игрокам
+                // Стартуем таймер хода до отправки, чтобы в GameStart был один turnStartedAt для обоих клиентов
+                game.StartTurnTimer();
+                var turnStartedAt = game.TurnStartedAtUtcMs;
+
                 var player1Conn = GameServer.Instance.GetConnectionByPlayerId(game.Player1.Id);
                 var player2Conn = GameServer.Instance.GetConnectionByPlayerId(game.Player2.Id);
 
@@ -853,7 +919,8 @@ public class WebSocketConnection
                             success = true,
                             firstPlayer = game.Player1.Id,
                             isYourTurn = true,
-                            myShips = p1Ships
+                            myShips = p1Ships,
+                            turnStartedAt
                         }
                     });
                     Console.WriteLine($"[DEBUG] ✅ GameStart sent to Player1");
@@ -870,11 +937,14 @@ public class WebSocketConnection
                             success = true,
                             firstPlayer = game.Player1.Id,
                             isYourTurn = false,
-                            myShips = p2Ships
+                            myShips = p2Ships,
+                            turnStartedAt
                         }
                     });
                     Console.WriteLine($"[DEBUG] ✅ GameStart sent to Player2");
                 }
+
+                game.RestartPending = false;
 
                 Console.WriteLine($"[PlayerReady] GameStart sent to both players");
                 Console.WriteLine($"[DEBUG] ============ HandlePlayerReady END (GAMESTART SENT) ============");

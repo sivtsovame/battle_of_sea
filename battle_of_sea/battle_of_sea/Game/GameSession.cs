@@ -14,8 +14,16 @@ namespace battle_of_sea.Game
         public bool Player2Ready { get; set; } = false;
         public bool Player1WantsPlayAgain { get; set; } = false;
         public bool Player2WantsPlayAgain { get; set; } = false;
+        /// <summary>
+        /// Флаг "игра переигрывается": оба выбрали PlayAgain и находятся на экране расстановки.
+        /// Пока он true, выход любого игрока из комнаты должен удалять комнату.
+        /// </summary>
+        public bool RestartPending { get; set; } = false;
 
         public string CurrentTurnPlayerId { get; private set; }
+
+        /// <summary>Unix-время (мс) начала текущего хода — передаётся клиентам для одинакового отображения таймера.</summary>
+        public long TurnStartedAtUtcMs { get; private set; }
 
         private readonly System.Timers.Timer _turnTimer;
         private const int TurnTimeMs = 30_000; // 30 секунд
@@ -33,7 +41,8 @@ namespace battle_of_sea.Game
             _turnTimer.AutoReset = false;
             _turnTimer.Elapsed += OnTurnTimeout;
 
-            StartTurnTimer();
+            // Таймер первого хода запускается только после того,
+            // как оба игрока нажали "Готов" (см. HandlePlayerReady).
         }
 
         public Player GetCurrentPlayer() =>
@@ -51,35 +60,52 @@ namespace battle_of_sea.Game
             StartTurnTimer();
         }
 
-        private void StartTurnTimer()
+        /// <summary>
+        /// Запускает/перезапускает серверный таймер хода на полные 30 секунд.
+        /// </summary>
+        public void StartTurnTimer()
         {
             _turnTimer.Stop();
             _turnTimer.Start();
+            TurnStartedAtUtcMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
         }
 
         private async void OnTurnTimeout(object sender, ElapsedEventArgs e)
         {
+            // Игра уже завершена (например, последний выстрел потопил все корабли) — не переключаем ход.
+            // Иначе "опоздавший" колбэк таймера мог бы переключить ход после победы.
+            if (IsFinished)
+            {
+                Console.WriteLine("Turn timeout ignored: game already finished.");
+                return;
+            }
+
             var timedOutPlayer = GetCurrentPlayer();
             var opponent = GetOpponentPlayer();
 
             Console.WriteLine($"Turn timeout: {timedOutPlayer.Name}");
 
-            // уведомляем обоих
-            await SendMessageToPlayer(timedOutPlayer, 
-                new ServerMessage { Type = "turn_timeout" });
-
-            await SendMessageToPlayer(opponent, 
-                new ServerMessage { Type = "your_turn" });
-
+            // Сначала переключаем ход и стартуем таймер, чтобы turnStartedAt был один для обоих клиентов
             SwitchTurn();
+            var turnStartedAt = TurnStartedAtUtcMs;
+
+            await SendMessageToPlayer(timedOutPlayer,
+                new ServerMessage { Type = "turn_timeout", Payload = new { turnStartedAt } });
+            await SendMessageToPlayer(opponent,
+                new ServerMessage { Type = "your_turn", Payload = new { turnStartedAt } });
         }
 
         public async Task ProcessShotAsync(Player shooter, int x, int y)
         {
+            // Останавливаем таймер на время обработки выстрела, чтобы колбэк таймаута не сработал
+            // между выстрелом и проверкой победы (особенно при серии попаданий без промахов).
+            _turnTimer.Stop();
+
             // Проверка хода (дополнительная защита)
             if (shooter.Id != CurrentTurnPlayerId)
             {
                 Console.WriteLine($"[ProcessShot] Not your turn: shooter.Id={shooter.Id}, CurrentTurnPlayerId={CurrentTurnPlayerId}, P1.Id={Player1.Id}, P2.Id={Player2.Id}");
+                StartTurnTimer(); // восстанавливаем таймер текущего хода
                 await SendMessageToPlayer(shooter, new ServerMessage
                 {
                     Type = "error",
@@ -92,15 +118,17 @@ namespace battle_of_sea.Game
 
             var result = opponent.Board.Shoot(x, y);
 
+            // При Hit/Sunk таймер перезапускаем и передаём turnStartedAt, чтобы клиент показывал те же 30 сек
+            if (result == ShotResult.Hit || result == ShotResult.Sunk)
+                StartTurnTimer();
+            var turnStartedAt = TurnStartedAtUtcMs;
 
-            // Результат стреляющему
             await SendMessageToPlayer(shooter, new ServerMessage
             {
                 Type = "ShootResult",
-                Payload = new { x, y, result = result.ToString() }
+                Payload = new { x, y, result = result.ToString(), turnStartedAt }
             });
 
-            // Результат противнику
             await SendMessageToPlayer(opponent, new ServerMessage
             {
                 Type = "OpponentShoot",
@@ -131,18 +159,18 @@ namespace battle_of_sea.Game
                 return;
             }
 
-            // Передаём ход только при промахе; при Hit/Sunk стреляющий стреляет снова (как в правилах морского боя)
+            // Передаём ход только при промахе; при Hit/Sunk стреляющий стреляет снова (как в правилах морского боя).
+            // При этом таймер хода всегда перезапускается заново на 30 секунд, независимо от результата выстрела.
             if (result == ShotResult.Miss)
             {
                 SwitchTurn();
                 var nextPlayer = GetCurrentPlayer();
                 var prevPlayer = GetOpponentPlayer();
-                
-                // Уведомляем оба плеера о смене хода
-                await SendMessageToPlayer(nextPlayer, 
-                    new ServerMessage { Type = "YourTurn" });
+                var startedAt = TurnStartedAtUtcMs;
+                await SendMessageToPlayer(nextPlayer,
+                    new ServerMessage { Type = "YourTurn", Payload = new { turnStartedAt = startedAt } });
                 await SendMessageToPlayer(prevPlayer,
-                    new ServerMessage { Type = "OpponentTurn" });
+                    new ServerMessage { Type = "OpponentTurn", Payload = new { turnStartedAt = startedAt } });
             }
             // при Hit/Sunk ход не переключается — ShootResult уже отправлен, клиент оставит isMyTurn=true
         }
@@ -164,9 +192,10 @@ namespace battle_of_sea.Game
             
             // Сбрасываем флаг завершения
             IsFinished = false;
-            
-            // Перезапускаем таймер
-            StartTurnTimer();
+            // Помечаем, что мы находимся в состоянии "переигровки" (оба на экране расстановки)
+            RestartPending = true;
+
+            // Таймер новой игры запустится, когда оба снова нажмут "Готов"
         }
 
         private async Task SendMessageToPlayer(Player player, ServerMessage message)

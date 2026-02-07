@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.ComponentModel;
 using System.Runtime.CompilerServices;
 using client.Models;
@@ -31,53 +32,47 @@ public class MainWindowViewModel : INotifyPropertyChanged
 
     private void OnRoomJoined(RoomInfo room)
     {
+        if (CurrentViewModel is MainMenuViewModel mainMenu)
+            mainMenu.DetachFromClient();
+        GoToPlacement(room);
+    }
+
+    /// <summary>Переход на экран расстановки. При «Начать новую игру» сервер шлёт ReturnToPlacement — тогда вызывается это (сколько угодно раз).</summary>
+    private void GoToPlacement(RoomInfo room)
+    {
         var placement = new PlacementViewModel(GameClient, room, GameClient.DisplayName);
         placement.BackRequested += () =>
         {
-            // вернуться в главное меню
             var menu = new MainMenuViewModel(GameClient);
             menu.RoomJoined += OnRoomJoined;
             CurrentViewModel = menu;
         };
-        placement.GameStarted += (isYourTurn, myShipsFromServer) =>
+        placement.GameStarted += (isYourTurn, myShipsFromServer, turnStartedAtUtcMs) =>
         {
             var myShips = myShipsFromServer ?? placement.GetShipCoordinates();
             placement.DetachFromClient();
-            var gameVm = new GameViewModel(GameClient, room, isYourTurn, myShips);
-            gameVm.ReturnToMainMenuRequested += () =>
-            {
-                var menu = new MainMenuViewModel(GameClient);
-                menu.RoomJoined += OnRoomJoined;
-                CurrentViewModel = menu;
-            };
-            gameVm.ReturnToPlacementRequested += returnRoom =>
-            {
-                var newPlacement = new PlacementViewModel(GameClient, returnRoom, GameClient.DisplayName);
-                newPlacement.BackRequested += () =>
-                {
-                    var menu = new MainMenuViewModel(GameClient);
-                    menu.RoomJoined += OnRoomJoined;
-                    CurrentViewModel = menu;
-                };
-                newPlacement.GameStarted += (isYourTurnAgain, myShipsFromServerAgain) =>
-                {
-                    var myShipsAgain = myShipsFromServerAgain ?? newPlacement.GetShipCoordinates();
-                    newPlacement.DetachFromClient();
-                    var gameVmAgain = new GameViewModel(GameClient, returnRoom, isYourTurnAgain, myShipsAgain);
-                    gameVmAgain.ReturnToMainMenuRequested += () =>
-                    {
-                        var m = new MainMenuViewModel(GameClient);
-                        m.RoomJoined += OnRoomJoined;
-                        CurrentViewModel = m;
-                    };
-                    CurrentViewModel = gameVmAgain;
-                };
-                CurrentViewModel = newPlacement;
-            };
-            CurrentViewModel = gameVm;
+            GoToGame(room, isYourTurn, myShips, turnStartedAtUtcMs);
         };
-
         CurrentViewModel = placement;
+    }
+
+    /// <summary>Переход в игру. У каждого GameViewModel подписываем ReturnToPlacementRequested → снова GoToPlacement.</summary>
+    private void GoToGame(RoomInfo room, bool isYourTurn, IReadOnlyList<(int x, int y)> myShips, long turnStartedAtUtcMs = 0)
+    {
+        var gameVm = new GameViewModel(GameClient, room, isYourTurn, myShips, turnStartedAtUtcMs);
+        gameVm.ReturnToMainMenuRequested += () =>
+        {
+            gameVm.DetachFromClient();
+            var menu = new MainMenuViewModel(GameClient);
+            menu.RoomJoined += OnRoomJoined;
+            CurrentViewModel = menu;
+        };
+        gameVm.ReturnToPlacementRequested += returnRoom =>
+        {
+            gameVm.DetachFromClient();
+            GoToPlacement(returnRoom);
+        };
+        CurrentViewModel = gameVm;
     }
 
     protected void OnPropertyChanged([CallerMemberName] string? propertyName = null)
