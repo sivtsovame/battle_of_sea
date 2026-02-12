@@ -68,6 +68,7 @@ namespace battle_of_sea.Game
                 if (game != null)
                 {
                     var roomForGame = Rooms.FirstOrDefault(r => r.Players.Contains(game.Player1) || r.Players.Contains(game.Player2));
+<<<<<<< HEAD
 
                     // Если игра ещё не была завершена — считаем, что один из клиентов "закрыл окно".
                     // Победа достаётся оставшемуся игроку, игра завершается, комната удаляется.
@@ -97,6 +98,77 @@ namespace battle_of_sea.Game
                         // Игра уже была завершена (обычная победа) — просто удаляем её.
                         ActiveGames.Remove(game);
                         Console.WriteLine($"[RemovePlayer] Finished game removed: {game.Player1.Name} vs {game.Player2.Name}");
+=======
+                    var otherPlayer = game.Player1.Id == playerId ? game.Player2 : game.Player1;
+
+                    // ВАЖНО: если оба выбрали PlayAgain и находятся на расстановке (RestartPending=true),
+                    // то при дисконнекте/закрытии окна НЕ шлём GameOver. Нужно удалить комнату и вернуть второго в лобби.
+                    // Аналогично можно считать и для "пост-игры" (IsFinished=true) — игра уже закончилась, просто закрываем комнату.
+                    if (game.RestartPending || game.IsFinished)
+                    {
+                        if (roomForGame != null)
+                        {
+                            Rooms.Remove(roomForGame);
+                            Console.WriteLine($"[RemovePlayer] Room removed due to disconnect during restart/finished: {roomForGame.Name}");
+                        }
+
+                        if (otherPlayer != null)
+                        {
+                            try
+                            {
+                                if (otherPlayer.Connection is WebSocketConnection otherWs)
+                                {
+                                    await otherWs.SendAsync(new ServerMessage
+                                    {
+                                        Type = "RoomClosed",
+                                        Payload = new { message = "Соперник вышел из игры. Комната закрыта." }
+                                    });
+                                }
+                                else if (otherPlayer.Connection is ClientConnection otherTcp)
+                                {
+                                    await otherTcp.SendAsync(new ServerMessage
+                                    {
+                                        Type = "RoomClosed",
+                                        Payload = new { message = "Соперник вышел из игры. Комната закрыта." }
+                                    });
+                                }
+                            }
+                            catch (Exception ex)
+                            {
+                                Console.WriteLine($"[RemovePlayer] Error sending RoomClosed to other player: {ex.Message}");
+                            }
+                        }
+
+                        ActiveGames.Remove(game);
+                        Console.WriteLine($"[RemovePlayer] Game removed due to disconnect during restart/finished: {game.Player1.Name} vs {game.Player2.Name}");
+                    }
+                    else
+                    {
+
+                        // Если игра ещё не была завершена — считаем, что один из клиентов "закрыл окно" во время боя.
+                        // Победа достаётся оставшемуся игроку, игра завершается, комната удаляется.
+                        if (!game.IsFinished)
+                        {
+                            var winner = game.Player1.Id == playerId ? game.Player2 : game.Player1;
+                            if (winner != null && winner.Connection is WebSocketConnection wsConn)
+                            {
+                                await wsConn.SendAsync(new ServerMessage
+                                {
+                                    Type = "GameOver",
+                                    Payload = new { winner = winner.Name, reason = "opponent_disconnected" }
+                                });
+                            }
+
+                            if (roomForGame != null)
+                            {
+                                Rooms.Remove(roomForGame);
+                                Console.WriteLine($"[RemovePlayer] Room removed due to disconnect: {roomForGame.Name}");
+                            }
+
+                            ActiveGames.Remove(game);
+                            Console.WriteLine($"[RemovePlayer] Game removed due to disconnect: {game.Player1.Name} vs {game.Player2.Name}");
+                        }
+>>>>>>> a00753e (.)
                     }
                 }
 

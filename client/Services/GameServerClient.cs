@@ -1,5 +1,6 @@
 using System;
 using System.IO;
+using System.Net.Sockets;
 using System.Net.WebSockets;
 using System.Text;
 using System.Text.Json;
@@ -11,7 +12,7 @@ namespace client.Services;
 
 public class GameServerClient : IAsyncDisposable
 {
-    private readonly ClientWebSocket _webSocket = new();
+    private ClientWebSocket? _webSocket;
     private readonly JsonSerializerOptions _jsonOptions = new()
     {
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase
@@ -19,10 +20,17 @@ public class GameServerClient : IAsyncDisposable
 
     private CancellationTokenSource? _receiveCts;
     private string _displayName = string.Empty;
+    private string _lastUri = string.Empty;
 
     public event Action<string, JsonElement>? MessageReceived;
-    public bool IsConnected => _webSocket.State == WebSocketState.Open;
+    /// <summary>Вызывается на UI-потоке, когда соединение с сервером потеряно (сервер закрыл или сеть оборвалась).</summary>
+    public event Action? ServerDisconnected;
+    /// <summary>Вызывается на UI-потоке после успешного подключения.</summary>
+    public event Action? ServerConnected;
+
+    public bool IsConnected => _webSocket?.State == WebSocketState.Open;
     public string DisplayName => _displayName;
+    public string LastUri => _lastUri;
 
     public async Task ConnectAsync(string uri, string displayName)
     {
@@ -30,6 +38,12 @@ public class GameServerClient : IAsyncDisposable
             return;
 
         _displayName = displayName;
+        _lastUri = uri;
+
+        // ClientWebSocket нельзя переиспользовать после Close/Abort — создаём новый при каждом подключении.
+        try { _receiveCts?.Cancel(); } catch { /* ignore */ }
+        try { _webSocket?.Dispose(); } catch { /* ignore */ }
+        _webSocket = new ClientWebSocket();
 
         await _webSocket.ConnectAsync(new Uri(uri), CancellationToken.None);
 
@@ -44,6 +58,7 @@ public class GameServerClient : IAsyncDisposable
         };
 
         await SendAsync("connect", payload);
+        Dispatcher.UIThread.Post(() => ServerConnected?.Invoke());
     }
 
     public async Task SendAsync(string type, object payload)
@@ -59,7 +74,7 @@ public class GameServerClient : IAsyncDisposable
 
         var json = JsonSerializer.Serialize(envelope, _jsonOptions);
         var buffer = Encoding.UTF8.GetBytes(json);
-        await _webSocket.SendAsync(buffer, WebSocketMessageType.Text, true, CancellationToken.None);
+        await _webSocket!.SendAsync(buffer, WebSocketMessageType.Text, true, CancellationToken.None);
     }
 
     private async Task ReceiveLoopAsync(CancellationToken cancellationToken)
@@ -68,7 +83,7 @@ public class GameServerClient : IAsyncDisposable
 
         try
         {
-            while (!cancellationToken.IsCancellationRequested && _webSocket.State == WebSocketState.Open)
+            while (!cancellationToken.IsCancellationRequested && _webSocket != null && _webSocket.State == WebSocketState.Open)
             {
                 var segment = new ArraySegment<byte>(buffer);
                 WebSocketReceiveResult result;
@@ -112,11 +127,32 @@ public class GameServerClient : IAsyncDisposable
         }
         catch (OperationCanceledException)
         {
-            // ignore
+            // Выход по отмене (Dispose) — не показываем "сервер отключён"
         }
         catch (Exception)
         {
-            // TODO: add logging / error surface
+            // Соединение оборвалось (сеть, сервер упал и т.д.)
+        }
+        finally
+        {
+            if (!cancellationToken.IsCancellationRequested)
+                Dispatcher.UIThread.Post(() => ServerDisconnected?.Invoke());
+        }
+    }
+
+    /// <summary>Быстрая проверка доступности сервера (без WebSocket), чтобы включить кнопку «Подключиться».</summary>
+    public static async Task<bool> IsServerReachableAsync(string host, int port, int timeoutMs = 500)
+    {
+        try
+        {
+            using var tcp = new TcpClient();
+            var connectTask = tcp.ConnectAsync(host, port);
+            var done = await Task.WhenAny(connectTask, Task.Delay(timeoutMs)) == connectTask;
+            return done && tcp.Connected;
+        }
+        catch
+        {
+            return false;
         }
     }
 
@@ -125,7 +161,7 @@ public class GameServerClient : IAsyncDisposable
         try
         {
             _receiveCts?.Cancel();
-            if (_webSocket.State == WebSocketState.Open || _webSocket.State == WebSocketState.CloseReceived)
+            if (_webSocket != null && (_webSocket.State == WebSocketState.Open || _webSocket.State == WebSocketState.CloseReceived))
             {
                 await _webSocket.CloseAsync(WebSocketCloseStatus.NormalClosure, "Disposing", CancellationToken.None);
             }
@@ -134,7 +170,7 @@ public class GameServerClient : IAsyncDisposable
         {
             // ignore
         }
-        _webSocket.Dispose();
+        try { _webSocket?.Dispose(); } catch { /* ignore */ }
     }
 
     private static bool TryGetPropertyCaseInsensitive(JsonElement element, string name, out JsonElement value)

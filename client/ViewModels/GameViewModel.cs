@@ -370,6 +370,8 @@ public class GameViewModel : INotifyPropertyChanged
                 cell.ShotState = newState;
             }
         }
+        // Ход задаётся только сервером. Рассинхрон "оба — мой ход" или "оба — ход соперника" возможен,
+        // если одно из пары сообщений (YourTurn / OpponentTurn) не дошло до клиента (см. GameSession).
         else if (string.Equals(type, "YourTurn", StringComparison.OrdinalIgnoreCase) ||
                  string.Equals(type, "your_turn", StringComparison.OrdinalIgnoreCase))
         {
@@ -421,6 +423,7 @@ public class GameViewModel : INotifyPropertyChanged
         else if (string.Equals(type, "ReturnToPlacement", StringComparison.OrdinalIgnoreCase))
         {
             Console.WriteLine("[GameViewModel] ReturnToPlacement message received");
+            Room.Players = 2;
             ReturnToPlacementRequested?.Invoke(Room);
         }
         else if (string.Equals(type, "RoomClosed", StringComparison.OrdinalIgnoreCase))

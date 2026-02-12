@@ -5,6 +5,17 @@ using System.Timers;
 
 namespace battle_of_sea.Game
 {
+    /// <summary>
+    /// Сессия игры. Состояние хода на клиентах (IsMyTurn) полностью определяется сообщениями сервера
+    /// (GameStart.isYourTurn, YourTurn, OpponentTurn, turn_timeout). Рассинхрон возможен только при частичной доставке:
+    /// — Оба клиента "мой ход": если при смене хода (Miss или timeout) одному игроку ушло YourTurn, а второму
+    ///   не удалось доставить OpponentTurn (обрыв/ошибка SendMessageToPlayer). Тогда получивший YourTurn считает ход своим,
+    ///   не получивший OpponentTurn остаётся с прежним IsMyTurn=true.
+    /// — Оба клиента "ход соперника": если доставлен OpponentTurn, а YourTurn не доставлен (второй клиент отключён
+    ///   или ошибка отправки). Тогда оба показывают "ход соперника".
+    /// Рекомендация: при ошибке SendMessageToPlayer логировать и по возможности уведомить второго игрока (например,
+    /// закрыть игру или отправить принудительную синхронизацию хода).
+    /// </summary>
     public class GameSession
     {
         public Player Player1 { get; }

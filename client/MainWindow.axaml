@@ -12,5 +12,37 @@
         WindowStartupLocation="CenterScreen"
         x:Class="client.MainWindow"
         Title="Морской бой">
-  <ContentControl Content="{Binding CurrentViewModel}"/>
+  <Grid>
+    <ContentControl Content="{Binding CurrentViewModel}"/>
+    <Border IsVisible="{Binding ServerDisconnectedVisible}"
+            Background="#E0000000"
+            HorizontalAlignment="Stretch"
+            VerticalAlignment="Stretch"
+            ZIndex="1000">
+      <Border Background="#FFF5F5F5"
+              CornerRadius="8"
+              Padding="24"
+              MinWidth="280"
+              HorizontalAlignment="Center"
+              VerticalAlignment="Center"
+              BoxShadow="0 4 20 4 #40000000">
+        <StackPanel Spacing="16">
+          <TextBlock Text="{Binding ServerDisconnectedMessage}"
+                     TextWrapping="Wrap"
+                     FontSize="16"
+                     TextAlignment="Center"
+                     HorizontalAlignment="Center"/>
+          <StackPanel Orientation="Horizontal" Spacing="12" HorizontalAlignment="Center">
+            <Button Content="Подключиться"
+                    IsVisible="{Binding ServerReconnectAvailable}"
+                    Command="{Binding ReconnectCommand}"
+                    MinWidth="140"/>
+            <Button Content="Закрыть"
+                    Command="{Binding CloseDisconnectCommand}"
+                    MinWidth="120"/>
+          </StackPanel>
+        </StackPanel>
+      </Border>
+    </Border>
+  </Grid>
 </Window>

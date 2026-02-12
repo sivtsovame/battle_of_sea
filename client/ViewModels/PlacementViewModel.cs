@@ -208,6 +208,11 @@ public class PlacementViewModel : INotifyPropertyChanged
                 Room.Name = roomName;
                 OnPropertyChanged(nameof(Room));
             }
+<<<<<<< HEAD
+=======
+            Room.Players = 2;
+            OnPropertyChanged(nameof(Room));
+>>>>>>> a00753e (.)
             CanUseChat = true;
             if (_isReady)
                 Status = "Вы готовы. Ожидаем соперника...";
